@@ -753,3 +753,39 @@ test("provision creates a space, adds the app and saves a route", async () => {
   assert.ok(json.manualAdds.includes("shailendrar@myrsolar.com"));
   assert.ok(json.manualAdds.every((e) => e.endsWith("@myrsolar.com")));
 });
+
+test("two overlapping /provision calls for the same phone create only one space", async () => {
+  // Models what was producing duplicate Google Chat groups: an overlapping
+  // /sync run, a retried request, etc. racing provision() for the same
+  // customer. Only one should win; the other must not create a second space.
+  const body = JSON.stringify({ name: "Race Customer", phone: "919333333333" });
+  const headers = {
+    "content-type": "application/json",
+    "x-provision-token": PROVISION_TOKEN,
+  };
+
+  const [resA, resB] = await Promise.all([
+    fetch(`${base}/provision`, { method: "POST", headers, body }),
+    fetch(`${base}/provision`, { method: "POST", headers, body }),
+  ]);
+  const [jsonA, jsonB] = await Promise.all([resA.json(), resB.json()]);
+
+  const results = [
+    { status: resA.status, json: jsonA },
+    { status: resB.status, json: jsonB },
+  ];
+  const wins = results.filter((r) => r.status === 200 && r.json.ok);
+  const losses = results.filter((r) => r.status === 400 && !r.json.ok);
+
+  assert.equal(wins.length, 1, "exactly one request succeeds");
+  assert.equal(losses.length, 1, "exactly one request is refused");
+  // Depending on exactly where the two requests interleave, the loser either
+  // finds a still-pending claim or one that already finished — both are
+  // correct outcomes of the fix, just different timing.
+  assert.match(losses[0].json.error, /already being provisioned|already has a space/);
+  assert.equal(calls.spaces.length, 1, "only one Chat space was created");
+  assert.equal(
+    (await store.byChatId("919333333333@c.us")).spaceName,
+    wins[0].json.route.spaceName
+  );
+});

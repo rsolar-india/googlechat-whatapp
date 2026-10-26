@@ -119,6 +119,22 @@ async function provision({
     }
   }
 
+  // 1b. Atomically claim this phone BEFORE creating anything in Google Chat.
+  //     Without this, two overlapping provision() calls for the same phone —
+  //     an overlapping /sync run on serverless, a retried request — could
+  //     both pass sheet-sync's "does a route exist yet" check and both create
+  //     a space. The claim is a DB-level compare-and-swap (unique chat_id),
+  //     so only one caller can ever win it; a claim left behind by a crashed
+  //     attempt is retried, not duplicated, after it goes stale.
+  const claim = await store.claimPhone({ customerName: name, customerPhone: intlPhone });
+  if (!claim.claimed) {
+    throw new Error(
+      claim.existing?.spaceName?.startsWith("_pending_")
+        ? `${intlPhone} is already being provisioned`
+        : `${intlPhone} already has a space (${claim.existing.spaceName})`
+    );
+  }
+
   // 2. Create the space with the home-domain (farmkart.com) leads. Google
   //    won't let this credential create an external space or add external
   //    members, so cross-org leads (myrsolar.com) are added by hand after.
@@ -143,6 +159,15 @@ async function provision({
   });
   console.log(`  ${space.name}`);
 
+  // 2a. Record the space against the claimed phone IMMEDIATELY — this is
+  //     what turns the claim into a real route. From here on, store.byPhone()
+  //     finds this customer, so a crash or failure in any step below can no
+  //     longer cause a retry to create a second space for them.
+  const route = await store.finalizeRoute(claim.chatId, {
+    spaceName: space.name,
+    department: dept,
+  });
+
   // 2b. Try the cross-org leads via API in case delegation ever gains the
   //     right; collect the ones that still need a manual add.
   const manualAdds = [];
@@ -159,15 +184,7 @@ async function provision({
   await addAppToSpace(space.name);
   console.log("  bridge app added");
 
-  // 4. Save the mapping the relay reads on every message.
-  const route = await store.addRoute({
-    customerName: name,
-    customerPhone: intlPhone,
-    spaceName: space.name,
-    department: dept,
-  });
-
-  // 4b. Welcome message to the customer — first thing they see on WhatsApp.
+  // 4. Welcome message to the customer — first thing they see on WhatsApp.
   await sendWelcomeMessage(route);
 
   // 5. Orientation message so leads know how this space behaves.
