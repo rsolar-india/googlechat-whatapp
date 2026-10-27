@@ -19,12 +19,25 @@ Date: <YYYY-MM-DD, India>
 
 | Done-when point | How it was tested | Result | Evidence |
 |---|---|---|---|
-| <point> | <steps> | pass, fail or not tested | <link or output> |
+| <point> | <steps> | pass, fail, after merge or not tested | <link or output> |
 
 Known gaps: <text, or none>
 ```
 
 5. Mark the pull request ready for review if it is a draft: `gh pr ready <number>`. Do not move the card. The comment starts the QA agent, and the status workflow moves the task to In QA once the pull request is ready for review.
 6. The QA agent answers on the task: fail sends it back to In Progress with what failed, "needs a person" asks Stephane, pass leaves a `QA pass` comment. Merge the code pull request only after that comment; the task closes once it is merged and deployed. Never merge before it.
+7. Points that can only be seen after the merge (spec 13.4, D34). Mark them "after merge" in the table, not "not tested": the QA agent does not fail them before the merge. Its comment then says "QA pass before merge" and lists them. Merge, check the deploy; the task stays In QA. When each of those points is true, post a comment that starts with "Post-merge evidence", with dated evidence for each point: `gh issue comment $ARGUMENTS -R rsolar-india/roadmap --body-file <file>`.
+
+```
+## Post-merge evidence
+
+Code pull request: <link>, merged <date>, deployed <where, date>
+
+| After-merge point | Evidence | Date |
+|---|---|---|
+| <point> | <job rows, screenshots, readings> | <YYYY-MM-DD> |
+```
+
+   That comment starts the QA agent for those points only. Never post a new test report for them.
 
 Reply with the comment link. If any point failed, say so and ask whether to send it to QA anyway: the QA agent will fail it.
