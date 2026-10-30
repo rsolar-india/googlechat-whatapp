@@ -111,6 +111,19 @@ const fileBackend = {
     fileSave(db);
     return existing;
   },
+  /** Free a phone whose space creation itself failed — nothing to clean up
+   *  in Chat, so immediately available for retry instead of waiting out
+   *  STALE_CLAIM_MS. Only removes a still-pending claim, never a real route. */
+  async releaseClaim(chatId) {
+    const db = fileLoad();
+    const idx = db.routes.findIndex(
+      (r) => r.chatId === chatId && isPending(r.spaceName)
+    );
+    if (idx >= 0) {
+      db.routes.splice(idx, 1);
+      fileSave(db);
+    }
+  },
   async logMessage(m) {
     fs.appendFileSync(
       `${FILE}.messages.jsonl`,
@@ -350,6 +363,16 @@ const mysqlBackend = {
     );
     return this.byChatId(chatId);
   },
+  /** Free a phone whose space creation itself failed — nothing to clean up
+   *  in Chat, so immediately available for retry instead of waiting out
+   *  STALE_CLAIM_MS. Only removes a still-pending claim, never a real route. */
+  async releaseClaim(chatId) {
+    await ensureTable();
+    await mysqlPool().query(
+      "DELETE FROM routes WHERE chat_id = ? AND space_name LIKE CONCAT(?, '%')",
+      [chatId, PENDING_PREFIX]
+    );
+  },
   async logMessage(m) {
     await ensureTable();
     await mysqlPool().query(
@@ -434,6 +457,11 @@ const mediaUrlsToMigrate = (pattern) => backend.mediaUrlsToMigrate(pattern);
 const updateMediaUrl = (id, mediaUrl) => backend.updateMediaUrl(id, mediaUrl);
 const claimPhone = (r) => backend.claimPhone(r);
 const finalizeRoute = (chatId, r) => backend.finalizeRoute(chatId, r);
+const releaseClaim = (chatId) => backend.releaseClaim(chatId);
+/** True if a route is a not-yet-created placeholder, not a real space —
+ *  callers that mean "already has a working space" should treat this the
+ *  same as no route at all. */
+const isPendingRoute = (route) => !!route && isPending(route.spaceName);
 
 module.exports = {
   addRoute,
@@ -447,5 +475,7 @@ module.exports = {
   updateMediaUrl,
   claimPhone,
   finalizeRoute,
+  releaseClaim,
+  isPendingRoute,
   toChatId,
 };

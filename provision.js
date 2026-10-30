@@ -152,11 +152,21 @@ async function provision({
   const externalMembers = all.filter((e) => e.split("@")[1] !== HOME_DOMAIN);
 
   console.log(`Creating space "${displayName}" (${homeMembers.length} members)`);
-  const space = await createSpaceWithMembers({
-    displayName,
-    description: `Customer channel — WhatsApp relay to ${phone}`,
-    memberEmails: homeMembers,
-  });
+  let space;
+  try {
+    space = await createSpaceWithMembers({
+      displayName,
+      description: `Customer channel — WhatsApp relay to ${phone}`,
+      memberEmails: homeMembers,
+    });
+  } catch (err) {
+    // No space was created, so there's nothing to clean up — free the phone
+    // right away instead of leaving it claimed for the full STALE_CLAIM_MS
+    // window. (A hard crash/timeout here, with no chance to run this catch,
+    // still falls back to the stale-claim reclaim in claimPhone().)
+    await store.releaseClaim(claim.chatId).catch(() => {});
+    throw err;
+  }
   console.log(`  ${space.name}`);
 
   // 2a. Record the space against the claimed phone IMMEDIATELY — this is

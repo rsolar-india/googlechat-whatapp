@@ -108,6 +108,32 @@ test("skips a phone that already has a route", async () => {
   );
 });
 
+test("does NOT skip a phone whose space creation never finished (pending claim)", async () => {
+  // A prior attempt claimed this phone but crashed/failed before a real
+  // space existed — store.byPhone() still finds a row, but it's a
+  // placeholder, not a working space. Before the fix, the old `if
+  // (await store.byPhone(phone)) continue` skipped this forever.
+  const claim = await store.claimPhone({
+    customerName: "Stuck Customer",
+    customerPhone: "919000001088",
+  });
+  assert.equal(claim.claimed, true);
+
+  sheetRows = [
+    HEADER,
+    [],
+    ["Stuck Customer", "919000001088", "sales1@farmkart.com", "Completed"],
+  ];
+
+  await sheetSync.poll();
+
+  assert.deepEqual(
+    provisionCalls.map((c) => c.name),
+    ["Stuck Customer"],
+    "a pending (not-yet-real) route is retried, not skipped forever"
+  );
+});
+
 test("skips rows missing a name or with a short phone", async () => {
   sheetRows = [
     HEADER,
