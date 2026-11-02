@@ -8,9 +8,16 @@
 //
 // The hook input is JSON on stdin (hook_event_name, tool_name, tool_input, cwd, ...).
 // Output is JSON on stdout. The script always exits 0; a refusal is a "deny" decision.
+//
+// Cloud routine exception: a repo that runs scheduled Claude Code cloud routines (which work on
+// a detached HEAD and push their reports to main) commits .claude/task-gate.json with
+// {"cloud_routines": true, "reason": "..."}. In that repo, and only when the session runs in the
+// cloud (CLAUDE_CODE_REMOTE=true), edits and pushes to main are allowed. Merges stay refused.
+// Local sessions in that repo, and cloud sessions in every other repo, keep the full gate.
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const TASK_BRANCH = /^(\d+(?:\.\d+)+)-/;
 const BUG_BRANCH = /^bug-(\d+)-/;
@@ -60,6 +67,24 @@ function currentBranch(cwd) {
   return null;
 }
 
+// True when this is a cloud session and the repo opted in through .claude/task-gate.json.
+function cloudRoutineExempt(cwd) {
+  if (process.env.CLAUDE_CODE_REMOTE !== 'true') return false;
+  let root;
+  try {
+    root = git(cwd, ['rev-parse', '--show-toplevel']);
+  } catch {
+    root = process.env.CLAUDE_PROJECT_DIR;
+  }
+  if (!root) return false;
+  try {
+    const cfg = JSON.parse(readFileSync(join(root, '.claude', 'task-gate.json'), 'utf8'));
+    return cfg !== null && typeof cfg === 'object' && cfg.cloud_routines === true;
+  } catch {
+    return false;
+  }
+}
+
 function classify(branch) {
   let m = BUG_BRANCH.exec(branch || '');
   if (m) return { kind: 'bug', id: m[1] };
@@ -87,7 +112,11 @@ function deny(reason) {
 function sessionStart(input) {
   const branch = currentBranch(input.cwd);
   let text;
-  if (branch === null) {
+  if (cloudRoutineExempt(input.cwd)) {
+    text =
+      'Cloud routine run: this repo opts out of the roadmap task gate for cloud sessions (.claude/task-gate.json). ' +
+      'Do not ask for a roadmap task. Follow the run steps in this repo\'s CLAUDE.md. Merging with gh pr merge is still refused.';
+  } else if (branch === null) {
     text =
       'The roadmap task gate could not read the git branch here (this folder is not a git repo, or git failed). ' +
       'If this is a code repo, it follows the rsolar-india roadmap rules (.claude/roadmap-rules.md): ' +
@@ -123,6 +152,7 @@ function preEdit(input) {
   const branch = currentBranch(input.cwd);
   if (branch === null) return; // not a git repo: the gate does not apply
   if (classify(branch)) return;
+  if (cloudRoutineExempt(input.cwd)) return;
   deny(NOT_ON_BRANCH_REASON);
 }
 
@@ -286,7 +316,7 @@ function preBash(input) {
       item.refspecs.some((r) => PROTECTED.has(refspecDest(r, branch))) ||
       (item.refspecs.length === 0 && branch !== null && PROTECTED.has(branch)) ||
       item.flags.includes('--mirror');
-    if (toMain) {
+    if (toMain && !cloudRoutineExempt(cwd)) {
       deny(PUSH_MAIN_REASON);
       return;
     }
