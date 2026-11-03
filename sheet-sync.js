@@ -101,7 +101,12 @@ async function poll() {
       const phone = String(row[cols.phone] || "").replace(/\D/g, "");
       const sales = String(row[cols.sales] || "").trim();
       if (!name || phone.length < 10) continue;
-      if (await store.byPhone(phone)) continue; // already has a space
+      const existingRoute = await store.byPhone(phone);
+      // A pending route (space creation never finished) isn't a real space —
+      // treat it as still a candidate so it keeps getting retried, instead of
+      // being skipped forever. provision()'s own claimPhone() decides whether
+      // to actually retry now (still fresh) or wait it out (still pending).
+      if (existingRoute && !store.isPendingRoute(existingRoute)) continue;
 
       candidates++;
       if (DRY_RUN) {

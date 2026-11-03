@@ -34,6 +34,9 @@ const calls = { wa: [], chat: [], spaces: [], contacts: [], members: [] };
 
 // Per-test override for what checkContact() returns.
 let contactResult = { contacts: [{ exists: true }] };
+// Per-test override to make createSpaceWithMembers throw (models a Google
+// Chat API failure during space creation, before any space exists).
+let spaceCreationError = null;
 
 function resetCalls() {
   calls.wa.length = 0;
@@ -42,6 +45,7 @@ function resetCalls() {
   calls.contacts.length = 0;
   calls.members.length = 0;
   contactResult = { contacts: [{ exists: true }] };
+  spaceCreationError = null;
 }
 
 const clientsPath = require.resolve("../clients");
@@ -59,6 +63,11 @@ require.cache[clientsPath] = {
       return { name: `${spaceName}/messages/1` };
     },
     createSpaceWithMembers: async (args) => {
+      if (spaceCreationError) {
+        const err = spaceCreationError;
+        spaceCreationError = null; // fails once, succeeds on retry
+        throw err;
+      }
       calls.spaces.push(args);
       return { name: "spaces/TEST123" };
     },
@@ -752,4 +761,97 @@ test("provision creates a space, adds the app and saves a route", async () => {
   assert.ok(Array.isArray(json.manualAdds));
   assert.ok(json.manualAdds.includes("shailendrar@myrsolar.com"));
   assert.ok(json.manualAdds.every((e) => e.endsWith("@myrsolar.com")));
+});
+
+test("two overlapping /provision calls for the same phone create only one space", async () => {
+  // Models what was producing duplicate Google Chat groups: an overlapping
+  // /sync run, a retried request, etc. racing provision() for the same
+  // customer. Only one should win; the other must not create a second space.
+  const body = JSON.stringify({ name: "Race Customer", phone: "919333333333" });
+  const headers = {
+    "content-type": "application/json",
+    "x-provision-token": PROVISION_TOKEN,
+  };
+
+  const [resA, resB] = await Promise.all([
+    fetch(`${base}/provision`, { method: "POST", headers, body }),
+    fetch(`${base}/provision`, { method: "POST", headers, body }),
+  ]);
+  const [jsonA, jsonB] = await Promise.all([resA.json(), resB.json()]);
+
+  const results = [
+    { status: resA.status, json: jsonA },
+    { status: resB.status, json: jsonB },
+  ];
+  const wins = results.filter((r) => r.status === 200 && r.json.ok);
+  const losses = results.filter((r) => r.status === 400 && !r.json.ok);
+
+  assert.equal(wins.length, 1, "exactly one request succeeds");
+  assert.equal(losses.length, 1, "exactly one request is refused");
+  // Depending on exactly where the two requests interleave, the loser either
+  // finds a still-pending claim or one that already finished — both are
+  // correct outcomes of the fix, just different timing.
+  assert.match(losses[0].json.error, /already being provisioned|already has a space/);
+  assert.equal(calls.spaces.length, 1, "only one Chat space was created");
+  assert.equal(
+    (await store.byChatId("919333333333@c.us")).spaceName,
+    wins[0].json.route.spaceName
+  );
+});
+
+test("a failed space creation releases the claim so the very next attempt succeeds", async () => {
+  // Models a Google Chat API failure (quota, transient error) during space
+  // creation itself — before any space exists, so there's nothing to orphan.
+  // The claim must be released immediately rather than left stuck for the
+  // full STALE_CLAIM_MS window.
+  spaceCreationError = new Error("Chat API 500: Internal error encountered.");
+
+  const body = JSON.stringify({ name: "Flaky Customer", phone: "919444444444" });
+  const headers = {
+    "content-type": "application/json",
+    "x-provision-token": PROVISION_TOKEN,
+  };
+
+  const failRes = await fetch(`${base}/provision`, { method: "POST", headers, body });
+  const failJson = await failRes.json();
+  assert.equal(failRes.status, 400);
+  assert.equal(failJson.ok, false);
+  assert.match(failJson.error, /Chat API 500/);
+  assert.equal(calls.spaces.length, 0, "no space was created on the failed attempt");
+
+  // No wait, no stale-claim timeout — the very next attempt must succeed.
+  const retryRes = await fetch(`${base}/provision`, { method: "POST", headers, body });
+  const retryJson = await retryRes.json();
+  assert.equal(retryRes.status, 200);
+  assert.equal(retryJson.ok, true);
+  assert.equal(calls.spaces.length, 1, "the retry created exactly one space");
+  assert.equal(
+    (await store.byChatId("919444444444@c.us")).spaceName,
+    retryJson.route.spaceName
+  );
+});
+
+test("an inbound WhatsApp message to a still-pending route is not relayed anywhere", async () => {
+  const claim = await store.claimPhone({
+    customerName: "Stuck Customer",
+    customerPhone: "919555555555",
+  });
+  assert.equal(claim.claimed, true);
+
+  const body = JSON.stringify({
+    event_type: "message.created",
+    data: {
+      message_id: "m-pending-1",
+      chat_id: "919555555555@c.us",
+      body: "hello?",
+      message_type: "chat",
+    },
+  });
+  await fetch(`${base}/periskope`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-periskope-signature": sign(body) },
+    body,
+  });
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(calls.chat.length, 0, "nothing posted into the fake pending space");
 });

@@ -13,6 +13,15 @@ const path = require("path");
 
 const USE_MYSQL = !!(process.env.DATABASE_URL || process.env.MYSQL_HOST);
 
+// Placeholder space_name a claimed-but-not-yet-created route holds until
+// finalizeRoute() sets the real one. Prefixed + chat_id-suffixed so it never
+// collides with a real (unique) space_name.
+const PENDING_PREFIX = "_pending_";
+const isPending = (spaceName) => !!spaceName && spaceName.startsWith(PENDING_PREFIX);
+// A claim older than this is assumed to belong to a crashed/timed-out
+// provision() attempt and can be taken over by a fresh one.
+const STALE_CLAIM_MS = Number(process.env.STALE_CLAIM_MS || 10 * 60 * 1000);
+
 /** Normalise a phone to Periskope's 1-1 chat_id form: 919876543210@c.us */
 function toChatId(phone) {
   const digits = String(phone).replace(/\D/g, "");
@@ -66,6 +75,54 @@ const fileBackend = {
   },
   async all() {
     return fileLoad().routes;
+  },
+  async claimPhone({ customerName, customerPhone }) {
+    const db = fileLoad();
+    const chatId = toChatId(customerPhone);
+    const existing = db.routes.find((r) => r.chatId === chatId);
+    if (existing) {
+      const stale =
+        isPending(existing.spaceName) &&
+        Date.now() - new Date(existing.createdAt).getTime() > STALE_CLAIM_MS;
+      if (!stale) return { claimed: false, existing };
+      existing.customerName = customerName;
+      existing.spaceName = `${PENDING_PREFIX}${chatId}`;
+      existing.createdAt = new Date().toISOString();
+      fileSave(db);
+      return { claimed: true, chatId };
+    }
+    db.routes.push({
+      customerName,
+      customerPhone: String(customerPhone),
+      chatId,
+      spaceName: `${PENDING_PREFIX}${chatId}`,
+      department: null,
+      createdAt: new Date().toISOString(),
+    });
+    fileSave(db);
+    return { claimed: true, chatId };
+  },
+  async finalizeRoute(chatId, { spaceName, department }) {
+    const db = fileLoad();
+    const existing = db.routes.find((r) => r.chatId === chatId);
+    if (!existing) return null;
+    existing.spaceName = spaceName;
+    existing.department = department || null;
+    fileSave(db);
+    return existing;
+  },
+  /** Free a phone whose space creation itself failed — nothing to clean up
+   *  in Chat, so immediately available for retry instead of waiting out
+   *  STALE_CLAIM_MS. Only removes a still-pending claim, never a real route. */
+  async releaseClaim(chatId) {
+    const db = fileLoad();
+    const idx = db.routes.findIndex(
+      (r) => r.chatId === chatId && isPending(r.spaceName)
+    );
+    if (idx >= 0) {
+      db.routes.splice(idx, 1);
+      fileSave(db);
+    }
   },
   async logMessage(m) {
     fs.appendFileSync(
@@ -260,6 +317,62 @@ const mysqlBackend = {
     );
     return rows.map(rowToRoute);
   },
+  /**
+   * Atomically reserve a phone number before anything is created in Google
+   * Chat, so two overlapping provision() attempts (racing /sync invocations,
+   * a retried request) can't both create a space for the same customer. The
+   * chat_id PRIMARY KEY is what makes the INSERT atomic across instances —
+   * only one caller can ever win it.
+   */
+  async claimPhone({ customerName, customerPhone }) {
+    await ensureTable();
+    const chatId = toChatId(customerPhone);
+    const pending = `${PENDING_PREFIX}${chatId}`;
+    try {
+      await mysqlPool().query(
+        `INSERT INTO routes (chat_id, customer_name, customer_phone, space_name)
+         VALUES (?, ?, ?, ?)`,
+        [chatId, customerName, String(customerPhone), pending]
+      );
+      return { claimed: true, chatId };
+    } catch (err) {
+      if (err.code !== "ER_DUP_ENTRY") throw err;
+      const existing = await this.byChatId(chatId);
+      const stale =
+        existing &&
+        isPending(existing.spaceName) &&
+        Date.now() - new Date(existing.createdAt).getTime() > STALE_CLAIM_MS;
+      if (!stale) return { claimed: false, existing };
+      // Steal the stale claim — compare-and-swap on the old space_name so a
+      // concurrent stealer can't both win.
+      const [result] = await mysqlPool().query(
+        `UPDATE routes SET customer_name = ?, space_name = ?
+         WHERE chat_id = ? AND space_name = ?`,
+        [customerName, pending, chatId, existing.spaceName]
+      );
+      if (result.affectedRows === 1) return { claimed: true, chatId };
+      return { claimed: false, existing: await this.byChatId(chatId) };
+    }
+  },
+  /** Replace a claimed route's placeholder with the real space it got. */
+  async finalizeRoute(chatId, { spaceName, department }) {
+    await ensureTable();
+    await mysqlPool().query(
+      "UPDATE routes SET space_name = ?, department = ? WHERE chat_id = ?",
+      [spaceName, department || null, chatId]
+    );
+    return this.byChatId(chatId);
+  },
+  /** Free a phone whose space creation itself failed — nothing to clean up
+   *  in Chat, so immediately available for retry instead of waiting out
+   *  STALE_CLAIM_MS. Only removes a still-pending claim, never a real route. */
+  async releaseClaim(chatId) {
+    await ensureTable();
+    await mysqlPool().query(
+      "DELETE FROM routes WHERE chat_id = ? AND space_name LIKE CONCAT(?, '%')",
+      [chatId, PENDING_PREFIX]
+    );
+  },
   async logMessage(m) {
     await ensureTable();
     await mysqlPool().query(
@@ -342,6 +455,13 @@ const logMessage = (m) => backend.logMessage(m);
 const messages = (opts) => backend.messages(opts);
 const mediaUrlsToMigrate = (pattern) => backend.mediaUrlsToMigrate(pattern);
 const updateMediaUrl = (id, mediaUrl) => backend.updateMediaUrl(id, mediaUrl);
+const claimPhone = (r) => backend.claimPhone(r);
+const finalizeRoute = (chatId, r) => backend.finalizeRoute(chatId, r);
+const releaseClaim = (chatId) => backend.releaseClaim(chatId);
+/** True if a route is a not-yet-created placeholder, not a real space —
+ *  callers that mean "already has a working space" should treat this the
+ *  same as no route at all. */
+const isPendingRoute = (route) => !!route && isPending(route.spaceName);
 
 module.exports = {
   addRoute,
@@ -353,5 +473,9 @@ module.exports = {
   messages,
   mediaUrlsToMigrate,
   updateMediaUrl,
+  claimPhone,
+  finalizeRoute,
+  releaseClaim,
+  isPendingRoute,
   toChatId,
 };

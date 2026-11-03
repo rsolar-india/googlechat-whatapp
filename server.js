@@ -316,12 +316,18 @@ app.post("/gchat", async (req, res) => {
 
     try {
       const existing = await store.byPhone(phone);
-      if (existing && existing.spaceName !== spaceName) {
+      // A pending route (an in-flight/failed provision() attempt) isn't a
+      // real conflict — a human creating the space by hand here should win.
+      if (
+        existing &&
+        !store.isPendingRoute(existing) &&
+        existing.spaceName !== spaceName
+      ) {
         return res.json({
           text: `⚠️ ${phone} is already linked to another space (\`${existing.spaceName}\`).`,
         });
       }
-      const isNew = !existing;
+      const isNew = !existing || store.isPendingRoute(existing);
       const route = await store.addRoute({
         customerName: custName,
         customerPhone: phone,
@@ -375,8 +381,11 @@ async function periskopeInbound(data) {
   if (isDuplicate(data?.message_id || data?.unique_id)) return;
 
   const route = await store.byChatId(data.chat_id);
-  if (!route) {
-    console.log(`unmapped inbound from ${data.chat_id}`);
+  if (!route || store.isPendingRoute(route)) {
+    // Pending = their space hasn't actually been created yet (a prior
+    // provisioning attempt is still in flight or failed) — there's nowhere
+    // real to post this yet.
+    console.log(`unmapped (or still-pending) inbound from ${data.chat_id}`);
     return;
   }
 
