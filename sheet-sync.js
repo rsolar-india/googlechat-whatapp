@@ -92,6 +92,18 @@ async function poll() {
     let made = 0;
     let candidates = 0;
 
+    // One bulk read instead of a DB round-trip per sheet row — with
+    // hundreds of already-"Completed" rows accumulating over time, the old
+    // per-row store.byPhone() lookup made every poll() slower, until it blew
+    // past Vercel's 60s function timeout before finishing (or provisioning
+    // anything new). Routes created *during* this same run (by provision()
+    // below) won't show up in this snapshot, but that only risks a second,
+    // wasted provision() attempt for a duplicate sheet row — claimPhone()'s
+    // atomic check still refuses it, so no duplicate space can result.
+    const routesByChatId = new Map(
+      (await store.all()).map((r) => [r.chatId, r])
+    );
+
     for (let r = FIRST_ROW - 1; r < values.length; r++) {
       const row = values[r] || [];
       const status = String(row[cols.status] || "").trim().toLowerCase();
@@ -101,7 +113,12 @@ async function poll() {
       const phone = String(row[cols.phone] || "").replace(/\D/g, "");
       const sales = String(row[cols.sales] || "").trim();
       if (!name || phone.length < 10) continue;
-      const existingRoute = await store.byPhone(phone);
+      let existingRoute;
+      try {
+        existingRoute = routesByChatId.get(store.toChatId(phone));
+      } catch {
+        continue; // unparseable phone — same as the old byPhone() catch-null path
+      }
       // A pending route (space creation never finished) isn't a real space —
       // treat it as still a candidate so it keeps getting retried, instead of
       // being skipped forever. provision()'s own claimPhone() decides whether
