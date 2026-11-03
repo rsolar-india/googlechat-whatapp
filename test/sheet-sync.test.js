@@ -134,6 +134,37 @@ test("does NOT skip a phone whose space creation never finished (pending claim)"
   );
 });
 
+test("poll() reads all routes once, not once per sheet row (avoids the N+1 DB-call timeout)", async () => {
+  // With hundreds of already-"Completed" rows accumulating in the sheet over
+  // time, a per-row store.byPhone() DB round-trip made poll() slow enough to
+  // blow past Vercel's 60s function timeout before it could finish — or
+  // provision anything new. store.all() should be called exactly once per
+  // poll(), however many rows there are.
+  const realAll = store.all;
+  let allCalls = 0;
+  store.all = (...args) => {
+    allCalls++;
+    return realAll.apply(store, args);
+  };
+  try {
+    const rows = [HEADER, []];
+    for (let i = 0; i < 50; i++) {
+      rows.push([`Customer ${i}`, `91900000${String(1000 + i)}`, "sales1@farmkart.com", "Completed"]);
+    }
+    sheetRows = rows;
+
+    await sheetSync.poll();
+
+    assert.equal(
+      allCalls,
+      1,
+      "store.all() should be called exactly once per poll(), regardless of row count"
+    );
+  } finally {
+    store.all = realAll;
+  }
+});
+
 test("skips rows missing a name or with a short phone", async () => {
   sheetRows = [
     HEADER,
