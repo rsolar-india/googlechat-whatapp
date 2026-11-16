@@ -23,11 +23,16 @@ const HOME_DOMAIN = (process.env.GOOGLE_IMPERSONATE_USER || "").split("@")[1];
 
 // First WhatsApp message a customer gets, the moment their space is created.
 // Override with the WELCOME_MESSAGE env var (use literal \n for line breaks).
-const DEFAULT_WELCOME_MESSAGE = `🌞 r-solar सोलर में आपका हार्दिक स्वागत है!
+const DEFAULT_WELCOME_MESSAGE = `🌞 *R-Solar सोलर में आपका हार्दिक स्वागत है!*
 
-आपके सोलर सिस्टम से जुड़ी सभी महत्वपूर्ण जानकारी, अपडेट एवं आवश्यक जानकारी लेने-देने के लिए इसी माध्यम का उपयोग किया जाएगा।
+आपके सोलर सिस्टम से जुड़ी सभी महत्वपूर्ण जानकारियाँ, आवश्यक अपडेट एवं सूचनाएँ आप तक पहुँचाने और आपसे आवश्यक जानकारी प्राप्त करने के लिए इसी WhatsApp ग्रुप एवं R-Solar Mobile App का उपयोग किया जाएगा।
 
-सिस्टम शुरू होने तक r-solar आपके साथ है। 🤝`;
+📲 *R-Solar Mobile App डाउनलोड करें:*
+Google Play Store – Download App  https://play.google.com/store/apps/details?id=com.rsolar.app&hl=en_IN
+
+कृपया ऊपर दिए गए लिंक से हमारा मोबाइल ऐप डाउनलोड करें और उसका उपयोग शुरू करें, ताकि आपको अपने सोलर सिस्टम से जुड़ी सभी महत्वपूर्ण जानकारियाँ और अपडेट समय पर मिल सकें।
+
+धन्यवाद! 🤝`;
 const WELCOME_MESSAGE = (process.env.WELCOME_MESSAGE || DEFAULT_WELCOME_MESSAGE)
   .replace(/\\n/g, "\n")
   .trim();
